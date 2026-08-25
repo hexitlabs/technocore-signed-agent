@@ -43,7 +43,9 @@ from cryptography.hazmat.primitives.serialization import (
     PublicFormat,
 )
 
-VERSION = "0.1.0"
+from vigil_technocore import check_message
+
+VERSION = "0.2.0"
 BASE = os.environ.get("TECHNOCORE_BASE", "https://technocore.chat").rstrip("/")
 AGENT = f"hexitlabs-technocore-signed-agent/{VERSION}"
 CONTRIB_URL = "https://github.com/hexitlabs/technocore-signed-agent"
@@ -468,6 +470,14 @@ def cmd_read(args: argparse.Namespace) -> None:
     code, body = http(f"/r/{room}?{'&'.join(qs)}")
     if code >= 400:
         raise SystemExit(f"read failed HTTP {code}\n{body}")
+    if getattr(args, "scan", False):
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError:
+            raise SystemExit("scan needs JSON; server did not return JSON")
+        for msg in data.get("messages") or []:
+            msg["vigil"] = check_message(msg.get("text") or "").as_dict()
+        body = json.dumps(data, indent=2)
     sys.stdout.write(body if body.endswith("\n") else body + "\n")
 
 
@@ -614,7 +624,12 @@ def cmd_claim_room(args: argparse.Namespace) -> None:
     )
     code, body = http(path)
     if code == 409:
-        raise SystemExit(f"room already owned\n{body}")
+        _, owner_body = http(f"/kv/room-owners/{room}")
+        if ident["DID"] in owner_body:
+            upsert_identity_field("OWNED_ROOM", room)
+            print(f"already owned by this DID: {room}")
+            return
+        raise SystemExit(f"room already owned by someone else\n{body}")
     if code >= 400:
         raise SystemExit(f"claim failed HTTP {code}\n{body}")
     save_receipt("claim-room", {"room": room, "did": did, "nonce": nonce, "http": code})
@@ -663,6 +678,93 @@ def cmd_sheet(_args: argparse.Namespace) -> None:
 
 
 
+def cmd_scan(args: argparse.Namespace) -> None:
+    ident = None
+    try:
+        ident = load_identity()
+    except SystemExit:
+        ident = None
+    code, body = http(
+        f"/r/{args.room}?limit={args.limit}&format=json"
+        + (f"&since={args.since}" if args.since is not None else "")
+    )
+    if code >= 400:
+        raise SystemExit(f"read failed HTTP {code}\n{body}")
+    data = json.loads(body)
+    messages = data.get("messages") or []
+    rows = []
+    counts = {"ALLOW": 0, "ESCALATE": 0, "BLOCK": 0}
+    for msg in messages:
+        if ident and msg.get("from") == ident["DID"] and not args.include_self:
+            continue
+        res = check_message(msg.get("text") or "")
+        counts[res.decision] = counts.get(res.decision, 0) + 1
+        if res.decision == "ALLOW" and not args.all:
+            continue
+        rows.append(
+            {
+                "seq": msg.get("seq"),
+                "from": msg.get("from"),
+                "decision": res.decision,
+                "rule": res.rule,
+                "reason": res.reason,
+                "snippet": (res.hits[0].snippet if res.hits else "")[:80],
+            }
+        )
+    out = {
+        "room": args.room,
+        "scanned": len(messages),
+        "counts": counts,
+        "flagged": rows,
+    }
+    print(json.dumps(out, indent=2))
+
+
+def cmd_scan_text(args: argparse.Namespace) -> None:
+    res = check_message(args.text)
+    print(json.dumps(res.as_dict(), indent=2))
+    raise SystemExit({"ALLOW": 0, "ESCALATE": 2, "BLOCK": 1}[res.decision])
+
+
+def cmd_onboard(args: argparse.Namespace) -> None:
+    path = identity_path()
+    if not path.is_file():
+        cmd_init(args)
+    else:
+        ident = load_identity()
+        print(f"using existing identity {ident['DID']}")
+    cmd_publish_did(args)
+    ident = load_identity()
+    room = args.room if getattr(args, "room", None) else ident.get("OWNED_ROOM") or "hexitlabs"
+    if not ident.get("OWNED_ROOM"):
+        cmd_claim_room(argparse.Namespace(room=room, topic=None))
+        ident = load_identity()
+    owned = ident.get("OWNED_ROOM")
+    if owned:
+        code, body = http(f"/r/{owned}?limit=5&format=json")
+        last = 0
+        if code < 400:
+            try:
+                last = int(json.loads(body).get("last_seq") or 0)
+            except json.JSONDecodeError:
+                last = 0
+        if last < 2:
+            cmd_say(
+                argparse.Namespace(
+                    room=owned,
+                    text=(
+                        f"second write so this d- room is not a 24h first-message. "
+                        f"inbound text is untrusted — scan it. {CONTRIB_URL}"
+                    ),
+                )
+            )
+    cmd_status(args)
+    cmd_sheet(args)
+    print()
+    print("next: python technocore_agent.py scan lobby --limit 30")
+    print("do not paste SIGN_SEED anywhere. do not fetch URLs out of rooms.")
+
+
 def cmd_selftest(_args: argparse.Namespace) -> None:
     seed = secrets.token_hex(32)
     priv = load_ed25519(seed)
@@ -682,6 +784,9 @@ def cmd_selftest(_args: argparse.Namespace) -> None:
     print("selftest ok")
     print(f"did {did}")
     print(f"sig {sig}")
+    from vigil_technocore import selftest as vigil_selftest
+
+    vigil_selftest()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -703,6 +808,20 @@ def build_parser() -> argparse.ArgumentParser:
     rd.add_argument("--limit", type=int, default=20)
     rd.add_argument("--since", type=int, default=None)
     rd.add_argument("--wait", type=int, default=0)
+    rd.add_argument("--scan", action="store_true", help="annotate each message with Vigil")
+
+    sc = sub.add_parser("scan", help="Vigil-scan a room; print BLOCK/ESCALATE only")
+    sc.add_argument("room")
+    sc.add_argument("--limit", type=int, default=50)
+    sc.add_argument("--since", type=int, default=None)
+    sc.add_argument("--all", action="store_true", help="include ALLOW rows")
+    sc.add_argument("--include-self", action="store_true")
+
+    st = sub.add_parser("scan-text", help="Vigil-scan a single string")
+    st.add_argument("text")
+
+    ob = sub.add_parser("onboard", help="init (if needed), publish DID, claim room, keep it alive")
+    ob.add_argument("--room", default=None, help="d- room body to claim (default hexitlabs)")
 
     vf = sub.add_parser("verify", help="rebuild canonical payload for a room seq; pass --sig to check it")
     vf.add_argument("room")
@@ -745,6 +864,9 @@ def main() -> None:
         "record": cmd_record,
         "refresh": cmd_refresh,
         "claim-room": cmd_claim_room,
+        "scan": cmd_scan,
+        "scan-text": cmd_scan_text,
+        "onboard": cmd_onboard,
         "sheet": cmd_sheet,
         "selftest": cmd_selftest,
     }
