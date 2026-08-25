@@ -290,7 +290,8 @@ def _lookalike(text: str, urls: list[str]) -> Hit | None:
 def _induce_fetch_non_allow(text: str, urls: list[str]) -> Hit | None:
     if not urls:
         return None
-    if not RULES[4][3].search(text) and not re.search(r"\b(?:fetch|curl|wget|visit|open)\b", text, re.I):
+    induce_re = next(p for name, _, _, p, _ in RULES if name == "induce_fetch")
+    if not induce_re.search(text):
         return None
     bad = [u for u in urls if not _url_allowed(u)]
     if not bad:
