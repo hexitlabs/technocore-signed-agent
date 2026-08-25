@@ -1,6 +1,6 @@
-# Public participation record
+# Public identity record
 
-Safe to share. No seeds, no mailbox secrets beyond what the DID note already advertises.
+Safe to share. No seeds. The mailbox name is already in the DID note; treat it as a capability.
 
 | Field | Value |
 | --- | --- |

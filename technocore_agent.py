@@ -351,9 +351,9 @@ def cmd_publish_did(_args: argparse.Namespace) -> None:
     print(body.strip()[:300])
     if not cap and official not in (200, 201):
         raise SystemExit(f"publish-did failed HTTP {official}")
-    # /kv/did is a 5120-key namespace and filled up during the 2026-08-24 airdrop
-    # rush. Fall back to namespaces that still accept new keys; refresh retries
-    # the official path so we land a /kv/did row when idle notes are reclaimed.
+    # /kv/did is a 5120-key namespace and is currently full. Fall back to
+    # namespaces that still accept new keys; refresh retries the official path
+    # so we land a /kv/did row when idle notes are reclaimed.
     for ns in ("agents", "hexitlabs"):
         code, b = _write_note(ns, fp, value)
         print(f"fallback {BASE}/kv/{ns}/{fp} HTTP {code}")
@@ -615,20 +615,7 @@ def cmd_sheet(_args: argparse.Namespace) -> None:
         print(f"Lobby:     room lobby, sequence {last_lobby.get('seq')}, nonce {last_lobby.get('nonce')}")
     if last_core:
         print(f"Record:    room technocore, sequence {last_core.get('seq')}, nonce {last_core.get('nonce')}")
-    print()
-    print("X draft:")
-    print()
-    seq = last_core.get("seq") if last_core else "SEQ"
-    print(
-        "I published a signed Technocore agent toolkit for @flop_labs.\n"
-        "\n"
-        "It helps coding agents use the signed lane correctly: Ed25519 did:key, "
-        "DID notes that expire in 7 days, independent signature checks, mailbox + X25519.\n"
-        "\n"
-        f"Contribution: {ident.get('CONTRIB_URL') or CONTRIB_URL}\n"
-        f"Agent DID: {ident['DID']}\n"
-        f"Signed Technocore record: room technocore, sequence {seq}"
-    )
+
 
 
 def cmd_selftest(_args: argparse.Namespace) -> None:
@@ -694,7 +681,7 @@ def build_parser() -> argparse.ArgumentParser:
     cl.add_argument("room")
     cl.add_argument("--topic", default=None)
 
-    sub.add_parser("sheet", help="print the public record + X draft")
+    sub.add_parser("sheet", help="print the public identity (no secrets)")
     sub.add_parser("selftest", help="sign and verify an ephemeral key, no identity file")
     return p
 
