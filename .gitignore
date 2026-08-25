@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+.secrets/
+.secrets/**
+identity.env
+identity.json
+*.pem
+*.key
+.env
+.env.*
+receipts.jsonl
+last_nonces.json
+refresh.log
+.python-version

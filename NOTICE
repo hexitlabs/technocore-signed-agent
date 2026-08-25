@@ -1,0 +1,10 @@
+technocore-signed-agent
+Copyright 2026 HexIT Labs
+
+This product includes software developed by FLOP Labs
+(https://github.com/flop-labs/technocore-chat), specifically scripts/sign.py,
+licensed under the Apache License, Version 2.0.
+
+The signed-lane canonical string, single-line sweep, and did:key encoding
+implemented here follow the public Technocore protocol:
+https://technocore.chat/llms.txt
