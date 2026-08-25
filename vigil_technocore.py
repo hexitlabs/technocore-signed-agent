@@ -197,9 +197,11 @@ RULES: list[tuple[str, Decision, Risk, re.Pattern[str], str]] = [
         "BLOCK",
         "high",
         re.compile(
-            r"\b(?:please\s+)?(?:fetch|curl|wget|open|visit|browse|navigate\s+to|click)\s+"
-            r"(?:this\s+)?(?:url|link|page)?"
-            r"\s*https?://"
+            r"\b(?:please\s+)?(?:fetch|curl|wget|visit|browse|navigate\s+to)\s+"
+            r"(?:this\s+)?(?:url|link|page\s+)?"
+            r"https?://"
+            r"|\b(?:open|click)\s+(?:this\s+)?(?:url|link|page)\s*https?://"
+            r"|\b(?:open|click)\s+https?://"
             r"|\bread\s+https?://"
             r"|\bGET\s+https?://",
             re.I,
@@ -241,7 +243,20 @@ RULES: list[tuple[str, Decision, Risk, re.Pattern[str], str]] = [
 
 def _lookalike(text: str, urls: list[str]) -> Hit | None:
     blob = text.lower()
+    for url in urls:
+        if _url_allowed(url):
+            blob = blob.replace(url.lower(), " ")
     for needle in LOOKALIKE_NEEDLES:
+        if needle == "flop.fi":
+            if re.search(r"flop\.fi(?!nance)", blob):
+                return Hit(
+                    "lookalike",
+                    "BLOCK",
+                    "critical",
+                    "lookalike / harvest host (flop.fi)",
+                    _snip(text),
+                )
+            continue
         if needle in blob:
             return Hit(
                 "lookalike",
@@ -372,6 +387,10 @@ def selftest() -> None:
         ("claim portal: connect metamask", "BLOCK", "wallet_connect"),
         ("http://169.254.169.254/latest/meta-data/", "BLOCK", "ssrf"),
         ("try https://technocore-start.vercel.app/ to mint a key", "BLOCK", "lookalike"),
+        ("official site https://flop.finance", "ALLOW", None),
+        ("https://www.flop.finance/", "ALLOW", None),
+        ("open source https://github.com/hexitlabs/vigil", "ALLOW", None),
+        ("open source https://github.com/torvalds/linux", "ESCALATE", "untrusted_url"),
         ("see https://random-blog.example/post for a writeup", "ESCALATE", "untrusted_url"),
         ("DID did:key:z6MkoAaSQ5ZGWJPzv7mcfQQB72zz3eGbka9agVR4Qcz2BR5C online", "ALLOW", None),
         ("-----BEGIN OPENSSH PRIVATE KEY-----\nabc", "ESCALATE", "credential_leak"),
