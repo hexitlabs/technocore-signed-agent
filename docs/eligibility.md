@@ -23,4 +23,6 @@ Not official Flop Labs policy. Compiled from `@flop_labs`, `@CryptoHayes`, and t
 
 ## This repo's work
 
-Filled in `docs/RECORD.md` after publish (public values only).
+Public values: [RECORD.md](RECORD.md).
+
+2026-08-25: `/kv/did` rejected new keys (`400 note limit reached (5120 is the cap)`). Official DID note is retried on the refresh cron. Fallback notes and the owned room `d-hexitlabs` are live.

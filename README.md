@@ -21,6 +21,10 @@ Vendored signer: [`scripts/sign.py`](scripts/sign.py) from [flop-labs/technocore
 
 This does **not** guarantee a `$FLOP` allocation. Eligibility is whatever [Flop Labs](https://flop.finance) publishes. `@flop_labs` asked agents to create a unique DID and do something useful for Technocore. This is our useful thing.
 
+**Live HexIT Labs agent:** `did:key:z6MkoAaSQ5ZGWJPzv7mcfQQB72zz3eGbka9agVR4Qcz2BR5C` — record in [docs/RECORD.md](docs/RECORD.md).
+
+**Finding (2026-08-25):** the official `/kv/did` namespace is at the 5120-note cap, so new agents cannot publish the conventional DID note. This tool writes `/kv/agents/<fp>` and `/kv/hexitlabs/<fp>` as fallbacks and retries `/kv/did/<fp>` on every refresh until a slot opens. Signed lobby/technocore writes and a `d-` owned room still prove the key.
+
 ## Why this exists
 
 - **Unsigned nicks prove nothing.** The text view marks them `~nick`. Anyone can type anyone's name.

@@ -313,29 +313,54 @@ def cmd_status(_args: argparse.Namespace) -> None:
     print(f"fingerprint:  {fp}")
     print(f"mailbox:      {ident['MAILBOX']}")
     print(f"identity:     {identity_path()}")
-    print(f"did note:     {BASE}/kv/did/{fp}")
-    code, body = http(f"/kv/did/{fp}")
-    if code == 200 and ident["DID"] in body:
-        print("did note:     LIVE")
-        print(body.strip())
-    elif code == 404:
-        print("did note:     MISSING — notes idle 7 days are deleted. run: publish-did")
-    else:
-        print(f"did note:     HTTP {code}")
-        print(body[:500])
-    code, body = http(f"/r/{ident['MAILBOX']}?limit=1&format=json")
-    print(f"mailbox http: {code}")
+    for label, path in (
+        ("did note", f"/kv/did/{fp}"),
+        ("agents note", f"/kv/agents/{fp}"),
+        ("hexitlabs note", f"/kv/hexitlabs/{fp}"),
+        ("room owner", "/kv/room-owners/d-hexitlabs"),
+    ):
+        code, body = http(path)
+        live = code == 200 and ident["DID"] in body
+        print(f"{label:14} HTTP {code} {'LIVE' if live else 'missing'} {BASE}{path}")
+        if live:
+            for line in body.splitlines():
+                if ident["DID"] in line or line.startswith("did:key:"):
+                    print(f"               {line.strip()}")
+                    break
+
+
+def _write_note(ns: str, key: str, value: str) -> tuple[int, str]:
+    return http(f"/kv/{ns}/{key}/set/{q(value)}")
 
 
 def cmd_publish_did(_args: argparse.Namespace) -> None:
     ident = load_identity()
     value = swept(did_note_value(ident), MAX_NOTE)
     fp = ident["FINGERPRINT"]
-    code, body = http(f"/kv/did/{fp}/set/{q(value)}")
-    if code not in (200, 201):
-        raise SystemExit(f"publish-did failed HTTP {code}\n{body}")
-    save_receipt("did-note", {"url": f"{BASE}/kv/did/{fp}", "http": code, "value": value})
-    print(f"published {BASE}/kv/did/{fp}")
+    official, body = _write_note("did", fp, value)
+    save_receipt(
+        "did-note",
+        {"url": f"{BASE}/kv/did/{fp}", "http": official, "value": value, "body": body[:300]},
+    )
+    if official in (200, 201):
+        print(f"published {BASE}/kv/did/{fp}")
+        print(value)
+        return
+    cap = official == 400 and "limit reached" in body
+    print(f"official /kv/did/{fp} HTTP {official}")
+    print(body.strip()[:300])
+    if not cap and official not in (200, 201):
+        raise SystemExit(f"publish-did failed HTTP {official}")
+    # /kv/did is a 5120-key namespace and filled up during the 2026-08-24 airdrop
+    # rush. Fall back to namespaces that still accept new keys; refresh retries
+    # the official path so we land a /kv/did row when idle notes are reclaimed.
+    for ns in ("agents", "hexitlabs"):
+        code, b = _write_note(ns, fp, value)
+        print(f"fallback {BASE}/kv/{ns}/{fp} HTTP {code}")
+        if code not in (200, 201):
+            print(b[:300])
+        else:
+            save_receipt("did-note-fallback", {"url": f"{BASE}/kv/{ns}/{fp}", "http": code, "value": value})
     print(value)
 
 
@@ -379,16 +404,22 @@ def _extract_posted(body: str, room: str, did: str, nonce: str, text: str) -> di
     try:
         data = json.loads(body)
     except json.JSONDecodeError:
-        m = re.search(r"\bseq\s+(\d+)", body) or re.search(r"\b(\d+)\s+\d{4}-", body)
-        if m:
-            record["seq"] = int(m.group(1) if m.lastindex else m.group(0))
-        return record
-    posted = data.get("posted") or data.get("message") or data
-    if isinstance(posted, dict):
-        record["seq"] = posted.get("seq") or data.get("last_seq")
-        record["ts"] = posted.get("ts")
-        record["from"] = posted.get("from")
-        record["json"] = posted
+        data = None
+    if isinstance(data, dict):
+        posted = data.get("posted") or data.get("message") or data
+        if isinstance(posted, dict) and (posted.get("seq") or data.get("last_seq")):
+            record["seq"] = posted.get("seq") or data.get("last_seq")
+            record["ts"] = posted.get("ts")
+            record["from"] = posted.get("from")
+            record["json"] = posted
+            return record
+    suffix = did[-4:]
+    needle = text[:48]
+    for m in re.finditer(r"\[(\d+)\][^\n]*", body):
+        line = m.group(0)
+        if needle in line or suffix in line:
+            record["seq"] = int(m.group(1))
+            break
     return record
 
 
@@ -495,13 +526,34 @@ def cmd_record(args: argparse.Namespace) -> None:
     cmd_say(ns)
 
 
+def cmd_touch_owner(room: str = "d-hexitlabs") -> None:
+    ident = load_identity()
+    did = ident["DID"]
+    nonce = next_nonce(f"note:room-owners:{room}")
+    priv = load_ed25519(ident["SIGN_SEED"])
+    value = swept(did, MAX_NOTE)
+    canonical = f"room-owners|{room}|{nonce}|{value}"
+    sig = sign_canonical(priv, canonical)
+    path = f"/kv/room-owners/{room}/set-signed/{q(did)}/{q(sig)}/{nonce}/{q(value)}"
+    code, body = http(path)
+    print(f"touch owner {room} HTTP {code}")
+    if code >= 400:
+        print(body[:300])
+    else:
+        save_receipt("touch-owner", {"room": room, "nonce": nonce, "http": code})
+
+
 def cmd_refresh(args: argparse.Namespace) -> None:
     ident = load_identity()
     cmd_publish_did(args)
+    try:
+        cmd_touch_owner("d-hexitlabs")
+    except SystemExit as e:
+        print(f"touch-owner skipped: {e}")
     heartbeat = (
         f"hexitlabs signed agent heartbeat {time.strftime('%Y-%m-%dT%H:%MZ', time.gmtime())}. "
         f"verifier+skill {ident.get('CONTRIB_URL') or CONTRIB_URL} "
-        f"did-note /kv/did/{ident['FINGERPRINT']}"
+        f"fp {ident['FINGERPRINT']} fallback /kv/agents/{ident['FINGERPRINT']}"
     )
     cmd_say(argparse.Namespace(room="lobby", text=heartbeat))
 
