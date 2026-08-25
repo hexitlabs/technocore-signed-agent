@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Refresh the DID note (notes idle 7 days are deleted) and post a short heartbeat.
+# Retry /kv/did, refresh fallback notes and room-owners, post in the owned room.
+# Lobby is not durable; do not heartbeat it from cron.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LOG="${TECHNOCORE_LOG:-$HOME/.config/technocore/refresh.log}"

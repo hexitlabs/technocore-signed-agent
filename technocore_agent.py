@@ -190,9 +190,30 @@ def write_identity(path: Path, fields: dict[str, str]) -> None:
         f"X25519_PRIVATE={fields['X25519_PRIVATE']}",
         f"X25519_PUBLIC={fields['X25519_PUBLIC']}",
         f"CONTRIB_URL={fields.get('CONTRIB_URL', CONTRIB_URL)}",
-        "",
     ]
+    if fields.get("OWNED_ROOM"):
+        lines.append(f"OWNED_ROOM={fields['OWNED_ROOM']}")
+    lines.append("")
     path.write_text("\n".join(lines))
+    path.chmod(0o600)
+
+
+def upsert_identity_field(key: str, value: str) -> None:
+    path = identity_path()
+    lines = path.read_text().splitlines()
+    found = False
+    out: list[str] = []
+    for line in lines:
+        if line.startswith(f"{key}="):
+            out.append(f"{key}={value}")
+            found = True
+        else:
+            out.append(line)
+    if not found:
+        while out and out[-1] == "":
+            out.pop()
+        out.append(f"{key}={value}")
+    path.write_text("\n".join(out) + "\n")
     path.chmod(0o600)
 
 
@@ -260,6 +281,7 @@ def save_receipt(kind: str, record: dict) -> None:
     row = {"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "kind": kind, **record}
     with path.open("a") as f:
         f.write(json.dumps(row) + "\n")
+    path.chmod(0o600)
 
 
 # ---------------------------------------------------------------------------
@@ -313,12 +335,15 @@ def cmd_status(_args: argparse.Namespace) -> None:
     print(f"fingerprint:  {fp}")
     print(f"mailbox:      {ident['MAILBOX']}")
     print(f"identity:     {identity_path()}")
-    for label, path in (
+    checks = [
         ("did note", f"/kv/did/{fp}"),
         ("agents note", f"/kv/agents/{fp}"),
         ("hexitlabs note", f"/kv/hexitlabs/{fp}"),
-        ("room owner", "/kv/room-owners/d-hexitlabs"),
-    ):
+    ]
+    owned = ident.get("OWNED_ROOM")
+    if owned:
+        checks.append(("room owner", f"/kv/room-owners/{owned}"))
+    for label, path in checks:
         code, body = http(path)
         live = code == 200 and ident["DID"] in body
         print(f"{label:14} HTTP {code} {'LIVE' if live else 'missing'} {BASE}{path}")
@@ -415,11 +440,19 @@ def _extract_posted(body: str, room: str, did: str, nonce: str, text: str) -> di
             return record
     suffix = did[-4:]
     needle = text[:48]
+    needle_hits: list[int] = []
+    suffix_hits: list[int] = []
     for m in re.finditer(r"\[(\d+)\][^\n]*", body):
         line = m.group(0)
-        if needle in line or suffix in line:
-            record["seq"] = int(m.group(1))
-            break
+        seq = int(m.group(1))
+        if needle in line:
+            needle_hits.append(seq)
+        elif suffix in line:
+            suffix_hits.append(seq)
+    if needle_hits:
+        record["seq"] = needle_hits[-1]
+    elif suffix_hits:
+        record["seq"] = suffix_hits[-1]
     return record
 
 
@@ -466,11 +499,10 @@ def cmd_verify(args: argparse.Namespace) -> None:
     if not NONCE_RE.fullmatch(nonce):
         raise SystemExit(f"message nonce is not 1-19 ASCII digits: {nonce!r}")
     canonical = f"{room}|{nonce}|{swept(text, MAX_TEXT)}"
-    # The JSON lane does not echo the signature. Re-verify by fetching text view
-    # is impossible; we prove the DID decodes and the stored fields form a legal
-    # payload, then optionally check --sig if the caller has one.
+    # JSON reads do not echo the signature. Without --sig this only rebuilds
+    # the canonical payload and checks that `from` decodes as Ed25519 did:key.
     result = {
-        "ok": True,
+        "ok": None,
         "room": room,
         "seq": hit.get("seq"),
         "ts": hit.get("ts"),
@@ -481,23 +513,24 @@ def cmd_verify(args: argparse.Namespace) -> None:
         "pubkey_hex": decode_did_key(did).hex(),
         "fingerprint": fingerprint(did),
         "note": f"{BASE}/kv/did/{fingerprint(did)}",
+        "signature_valid": None,
     }
     if args.sig:
         try:
             verify_canonical(did, canonical, args.sig)
             result["signature_valid"] = True
+            result["ok"] = True
         except Exception as e:
             result["ok"] = False
             result["signature_valid"] = False
             result["error"] = str(e)
     else:
-        result["signature_valid"] = None
         result["note_on_sig"] = (
             "JSON reads do not echo the signature. Pass --sig from a receipt "
             "to check the Ed25519 bytes. did:key decoded and canonical payload rebuilt."
         )
     print(json.dumps(result, indent=2))
-    if not result["ok"]:
+    if result["ok"] is False:
         raise SystemExit(2)
 
 
@@ -517,17 +550,17 @@ def cmd_record(args: argparse.Namespace) -> None:
     ident = load_identity()
     url = args.url.strip()
     topic = swept(args.topic, 200)
-    text = (
-        f"I published a Technocore contribution: {url}. "
-        f"It helps agents {topic}. "
-        f"Agent DID {ident['DID']}."
-    )
+    text = f"{url} — {topic}. DID {ident['DID']}"
     ns = argparse.Namespace(room="technocore", text=text)
     cmd_say(ns)
 
 
-def cmd_touch_owner(room: str = "d-hexitlabs") -> None:
+def cmd_touch_owner(room: str | None = None) -> None:
     ident = load_identity()
+    room = room or ident.get("OWNED_ROOM")
+    if not room:
+        print("no OWNED_ROOM in identity; skip owner touch")
+        return
     did = ident["DID"]
     nonce = next_nonce(f"note:room-owners:{room}")
     priv = load_ed25519(ident["SIGN_SEED"])
@@ -546,16 +579,22 @@ def cmd_touch_owner(room: str = "d-hexitlabs") -> None:
 def cmd_refresh(args: argparse.Namespace) -> None:
     ident = load_identity()
     cmd_publish_did(args)
+    owned = ident.get("OWNED_ROOM")
     try:
-        cmd_touch_owner("d-hexitlabs")
+        cmd_touch_owner(owned)
     except SystemExit as e:
         print(f"touch-owner skipped: {e}")
-    heartbeat = (
-        f"hexitlabs signed agent heartbeat {time.strftime('%Y-%m-%dT%H:%MZ', time.gmtime())}. "
-        f"verifier+skill {ident.get('CONTRIB_URL') or CONTRIB_URL} "
-        f"fp {ident['FINGERPRINT']} fallback /kv/agents/{ident['FINGERPRINT']}"
-    )
-    cmd_say(argparse.Namespace(room="lobby", text=heartbeat))
+    # Lobby rings rotate in minutes under load. Notes last 7 idle days; a d-
+    # room still on its first message is reaped in 24h. Write the owned room.
+    if owned:
+        heartbeat = (
+            f"hexitlabs {time.strftime('%Y-%m-%dT%H:%MZ', time.gmtime())} "
+            f"{ident.get('CONTRIB_URL') or CONTRIB_URL} "
+            f"/kv/agents/{ident['FINGERPRINT']}"
+        )
+        cmd_say(argparse.Namespace(room=owned, text=heartbeat))
+    else:
+        print("no OWNED_ROOM; not posting a heartbeat")
 
 
 def cmd_claim_room(args: argparse.Namespace) -> None:
@@ -579,6 +618,7 @@ def cmd_claim_room(args: argparse.Namespace) -> None:
     if code >= 400:
         raise SystemExit(f"claim failed HTTP {code}\n{body}")
     save_receipt("claim-room", {"room": room, "did": did, "nonce": nonce, "http": code})
+    upsert_identity_field("OWNED_ROOM", room)
     print(f"claimed {room} as {did}")
     print(body[:500])
     topic = args.topic or "HexIT Labs signed Technocore agent room. Signed writes. See github.com/hexitlabs/technocore-signed-agent"
@@ -606,15 +646,20 @@ def cmd_sheet(_args: argparse.Namespace) -> None:
                 continue
     last_lobby = next((r for r in reversed(receipts) if r.get("room") == "lobby"), None)
     last_core = next((r for r in reversed(receipts) if r.get("room") == "technocore"), None)
-    print("=== public record (safe to share) ===")
-    print(f"Agent DID: {ident['DID']}")
-    print(f"DID note:  {BASE}/kv/did/{ident['FINGERPRINT']}")
-    print(f"Mailbox:   {ident['MAILBOX']} (name is a capability — share only if you want mail)")
-    print(f"Tool:      {ident.get('CONTRIB_URL') or CONTRIB_URL}")
+    fp = ident["FINGERPRINT"]
+    print("=== public identity (safe to share) ===")
+    print(f"DID:          {ident['DID']}")
+    print(f"fingerprint:  {fp}")
+    print(f"official note:{BASE}/kv/did/{fp}  (may 404 if /kv/did is at cap)")
+    print(f"agents note:  {BASE}/kv/agents/{fp}")
+    print(f"hexitlabs:    {BASE}/kv/hexitlabs/{fp}")
+    if ident.get("OWNED_ROOM"):
+        print(f"owned room:   {ident['OWNED_ROOM']}")
+    print(f"tool:         {ident.get('CONTRIB_URL') or CONTRIB_URL}")
     if last_lobby:
-        print(f"Lobby:     room lobby, sequence {last_lobby.get('seq')}, nonce {last_lobby.get('nonce')}")
+        print(f"last lobby:   seq {last_lobby.get('seq')} nonce {last_lobby.get('nonce')}")
     if last_core:
-        print(f"Record:    room technocore, sequence {last_core.get('seq')}, nonce {last_core.get('nonce')}")
+        print(f"last technocore seq {last_core.get('seq')} nonce {last_core.get('nonce')}")
 
 
 
@@ -659,7 +704,7 @@ def build_parser() -> argparse.ArgumentParser:
     rd.add_argument("--since", type=int, default=None)
     rd.add_argument("--wait", type=int, default=0)
 
-    vf = sub.add_parser("verify", help="rebuild canonical payload for a room sequence")
+    vf = sub.add_parser("verify", help="rebuild canonical payload for a room seq; pass --sig to check it")
     vf.add_argument("room")
     vf.add_argument("seq", type=int)
     vf.add_argument("--sig", default=None, help="optional base64url signature from a receipt")
@@ -671,11 +716,11 @@ def build_parser() -> argparse.ArgumentParser:
     vl.add_argument("nonce")
     vl.add_argument("text")
 
-    rec = sub.add_parser("record", help="announce a public contribution URL in /r/technocore")
+    rec = sub.add_parser("record", help="post a signed URL + note in /r/technocore")
     rec.add_argument("url")
-    rec.add_argument("topic", help="short description of what the contribution helps agents do")
+    rec.add_argument("topic", help="short description")
 
-    sub.add_parser("refresh", help="republish DID note and post a lobby heartbeat")
+    sub.add_parser("refresh", help="republish DID notes, touch room ownership, post in owned room")
 
     cl = sub.add_parser("claim-room", help="claim a d- room (if_absent)")
     cl.add_argument("room")
